@@ -1,0 +1,13 @@
+.git
+.github
+.env
+__pycache__
+*.py[cod]
+*.log
+uploads
+models
+test-images
+*.pt
+*.pth
+*.onnx
+*.safetensors

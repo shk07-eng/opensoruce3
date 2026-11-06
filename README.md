@@ -4,7 +4,7 @@ FastAPI와 CPU용 ResNet-18 ImageNet 사전학습 모델을 사용하는 이미�
 
 ## 기술 스택
 
-- Python 3.12 x64
+- Python 3.14 x64 (현재 환경 기준)
 - FastAPI, Uvicorn
 - Pillow
 - PyTorch, Torchvision
@@ -17,6 +17,7 @@ Windows PowerShell에서 `upload` 폴더로 이동합니다.
 ```powershell
 cd "C:\Users\songh\옾소\animal-classifier\upload"
 python -m pip install -r requirements.txt
+python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-model.txt
 ```
 
 Python이 실제로 설치되어 있어야 합니다. `python`이 WindowsApps 실행 별칭으로만 연결되어 있다면 Python 3.12 x64를 설치하고 설치 과정에서 `Add Python to PATH`를 선택하세요.
