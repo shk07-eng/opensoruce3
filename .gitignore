@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.env
+*.log
+uploads/
+models/
+test-images/
+cache/
+.cache/
+.pytest_cache/
+reports/
+*.pt
+*.pth
+*.onnx
+*.safetensors
