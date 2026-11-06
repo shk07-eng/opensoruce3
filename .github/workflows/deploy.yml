@@ -57,4 +57,6 @@ jobs:
           $ErrorActionPreference='Stop'; $health=Invoke-WebRequest http://127.0.0.1:8001/api/health -UseBasicParsing -TimeoutSec 10; if ($health.StatusCode -ne 200) {throw 'Health check failed'}; $page=Invoke-WebRequest http://127.0.0.1:8001/ -UseBasicParsing -TimeoutSec 10; if ($page.StatusCode -ne 200) {throw 'Web page check failed'}; Write-Host 'Animal classifier deployment is healthy.'
       - name: Post Log in to Docker Hub
         if: always()
+        continue-on-error: true
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: docker logout
