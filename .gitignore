@@ -9,6 +9,10 @@ cache/
 .cache/
 .pytest_cache/
 reports/
+actions-runner/
+_work/
+runner.log
+runner-diagnostic-logs/
 *.pt
 *.pth
 *.onnx

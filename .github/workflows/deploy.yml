@@ -1,0 +1,60 @@
+name: Deploy animal classifier to Windows runner
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Animal Classifier Image"]
+    types: [completed]
+
+env:
+  IMAGE_NAME: animal-classifier
+  CONTAINER_NAME: animal-classifier
+  HOST_PORT: '8001'
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: [self-hosted, Windows, X64]
+    permissions:
+      contents: read
+    steps:
+      - name: Verify Docker environment
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        run: |
+          $ErrorActionPreference='Stop'
+          docker context use desktop-linux
+          docker info
+          if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop daemon is unavailable.' }
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Pull CI image
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.event.workflow_run.head_sha }}
+        run: |
+          $ErrorActionPreference='Stop'; docker pull $env:IMAGE
+          if ($LASTEXITCODE -ne 0) { throw "Image pull failed: $env:IMAGE" }
+      - name: Replace animal classifier container
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.event.workflow_run.head_sha }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $oldImage=''; $oldExists=docker ps -aq --filter "name=^/${env:CONTAINER_NAME}$"
+          if ($oldExists) { $oldImage=(docker inspect --format '{{.Config.Image}}' $env:CONTAINER_NAME).Trim() }
+          $candidate="$env:CONTAINER_NAME-candidate"; docker rm -f $candidate 2>$null
+          docker run -d --name $candidate -p 127.0.0.1:18001:8000 $env:IMAGE
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate container failed to start.' }
+          $healthy=$false; 1..30 | ForEach-Object { if (-not $healthy) { try { if ((Invoke-WebRequest http://127.0.0.1:18001/api/health -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200) {$healthy=$true} } catch {Start-Sleep 2} } }
+          if (-not $healthy) { docker logs $candidate; throw 'Candidate health check failed; existing container was preserved.' }
+          if ($oldExists) { docker rm -f $env:CONTAINER_NAME }
+          try { docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $env:IMAGE; if ($LASTEXITCODE -ne 0) {throw 'Production container failed to start.'}; docker rm -f $candidate } catch { if ($oldImage) { docker rm -f $env:CONTAINER_NAME 2>$null; docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $oldImage }; throw }
+      - name: Verify application health and web page
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        run: |
+          $ErrorActionPreference='Stop'; $health=Invoke-WebRequest http://127.0.0.1:8001/api/health -UseBasicParsing -TimeoutSec 10; if ($health.StatusCode -ne 200) {throw 'Health check failed'}; $page=Invoke-WebRequest http://127.0.0.1:8001/ -UseBasicParsing -TimeoutSec 10; if ($page.StatusCode -ne 200) {throw 'Web page check failed'}; Write-Host 'Animal classifier deployment is healthy.'
+      - name: Post Log in to Docker Hub
+        if: always()
+        run: docker logout
