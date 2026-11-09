@@ -145,7 +145,18 @@ jobs:
       - name: Verify application health and web page
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: |
-          $ErrorActionPreference='Stop'; $health=Invoke-WebRequest http://127.0.0.1:8001/api/health -UseBasicParsing -TimeoutSec 10; if ($health.StatusCode -ne 200) {throw 'Health check failed'}; $page=Invoke-WebRequest http://127.0.0.1:8001/ -UseBasicParsing -TimeoutSec 10; if ($page.StatusCode -ne 200) {throw 'Web page check failed'}; Write-Host 'Animal classifier deployment is healthy.'
+          $ErrorActionPreference='Stop'
+          $healthOk=$false
+          1..15 | ForEach-Object {
+            if (-not $healthOk) {
+              curl.exe --silent --show-error --fail --max-time 10 http://127.0.0.1:8001/api/health | Out-Host
+              if ($LASTEXITCODE -eq 0) { $healthOk=$true } else { Start-Sleep -Seconds 2 }
+            }
+          }
+          if (-not $healthOk) { docker ps -a --filter "name=animal-classifier"; docker logs --tail 200 animal-classifier; throw 'Health check failed' }
+          curl.exe --silent --show-error --fail --max-time 10 http://127.0.0.1:8001/ | Out-Null
+          if ($LASTEXITCODE -ne 0) { docker logs --tail 200 animal-classifier; throw 'Web page check failed' }
+          Write-Host 'Animal classifier deployment is healthy.'
       - name: Monitor deployed service and write Summary
         id: monitor
         if: always()
@@ -220,47 +231,6 @@ jobs:
           **Observed API requests:** $ok/$total successful.  
           **Zero-downtime conclusion:** limited to the observed After window; Before and During were not measured by this workflow.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-      - name: Post Log in to Docker Hub
-        if: always()
-        continue-on-error: true
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
-        run: docker logout
-      - name: Upload deployment logs and Summary data
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: animal-classifier-deployment-results
-          path: deployment-results
-          if-no-files-found: warn
-.Exception.Message)"
-            }
-
-            Start-Sleep -Seconds 2
-          }
-
-          if (-not $healthOk) {
-            Write-Host "Container status:"
-            docker ps -a --filter "name=animal-classifier"
-
-            Write-Host "Container logs:"
-            docker logs --tail 200 animal-classifier
-
-            throw "Application health check failed."
-          }
-
-          curl.exe `
-            --silent `
-            --show-error `
-            --fail `
-            --max-time 10 `
-            $pageUrl | Out-Null
-
-          if ($LASTEXITCODE -ne 0) {
-            docker logs --tail 200 animal-classifier
-            throw "Web page check failed."
-          }
-
-          Write-Host "Animal classifier deployment is healthy."
       - name: Post Log in to Docker Hub
         if: always()
         continue-on-error: true
