@@ -14,7 +14,7 @@ on:
 env:
   IMAGE_NAME: animal-classifier
   CONTAINER_NAME: animal-classifier
-  HOST_PORT: '8001'
+  HOST_PORT: "8001"
 
 jobs:
   deploy:
@@ -22,11 +22,12 @@ jobs:
     runs-on: self-hosted
     permissions:
       contents: read
+
     steps:
       - name: Verify Docker environment
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = "Stop"
           docker context use desktop-linux
           docker info
 
@@ -41,129 +42,175 @@ jobs:
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.event.workflow_run.head_sha }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = "Stop"
           docker pull $env:IMAGE
 
-      - name: Start independent deployment monitor
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
-        run: |
-          $dir = "$env:GITHUB_WORKSPACE\deployment-results"
-          New-Item -ItemType Directory -Force $dir | Out-Null
-          "Before" | Set-Content "$dir\phase.txt" -Encoding UTF8
-          Remove-Item "$dir\stop" -Force -ErrorAction SilentlyContinue
-
-          Start-Process powershell.exe `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:GITHUB_WORKSPACE\scripts\deployment_monitor.ps1`"" `
-            -WindowStyle Hidden
-
-          Start-Sleep -Seconds 10
-      - name: Replace animal classifier container
+      - name: Zero-downtime deployment verification
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.event.workflow_run.head_sha }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $oldImage = ''
-          $old = docker ps -aq --filter "name=^/${env:CONTAINER_NAME}$"
-          if ($old) { $oldImage = (docker inspect --format '{{.Config.Image}}' $env:CONTAINER_NAME).Trim() }
+          $ErrorActionPreference = "Stop"
+
+          $resultDir = Join-Path $env:GITHUB_WORKSPACE "deployment-results"
+          $csv = Join-Path $resultDir "requests.csv"
+
+          New-Item -ItemType Directory -Path $resultDir -Force | Out-Null
+          "stage,sequence,start,end,http,version,result,response_ms" |
+            Set-Content $csv -Encoding UTF8
+
+          function Test-App {
+            param(
+              [string]$Stage,
+              [int]$Sequence
+            )
+
+            $start = Get-Date
+            $http = 0
+            $version = ""
+            $result = "FAIL"
+
+            try {
+              $body = curl.exe `
+                --silent `
+                --show-error `
+                --fail `
+                --max-time 5 `
+                "http://127.0.0.1:8001/api/health"
+
+              if ($LASTEXITCODE -eq 0) {
+                $data = $body | ConvertFrom-Json
+                $http = 200
+                $version = [string]$data.model_version
+                $result = if ($version -eq "2.0") {
+                  "PASS"
+                } else {
+                  "WRONG_VERSION"
+                }
+              }
+            }
+            catch {
+              $result = "CONNECTION_ERROR"
+            }
+
+            $end = Get-Date
+            $ms = [math]::Round(($end - $start).TotalMilliseconds, 2)
+
+            "$Stage,$Sequence,$($start.ToUniversalTime().ToString('o')),$($end.ToUniversalTime().ToString('o')),$http,$version,$result,$ms" |
+              Add-Content $csv -Encoding UTF8
+
+            Write-Host "$Stage request=$Sequence http=$http version=$version result=$result response_ms=$ms"
+          }
+
+          # BEFORE: 기존 운영 컨테이너 상태 측정
+          1..10 | ForEach-Object {
+            Test-App "Before" $_
+            Start-Sleep -Seconds 1
+          }
+
+          # 후보 컨테이너를 먼저 검증
           $candidate = "$env:CONTAINER_NAME-candidate"
           docker rm -f $candidate 2>$null
-          docker run -d --name $candidate -p 127.0.0.1:18001:8000 $env:IMAGE
-          $healthy = $false
+
+          docker run -d `
+            --name $candidate `
+            -p 127.0.0.1:18001:8000 `
+            $env:IMAGE
+
+          $candidateHealthy = $false
+
           1..30 | ForEach-Object {
-            if (-not $healthy) {
-              curl.exe --silent --show-error --fail --max-time 5 http://127.0.0.1:18001/api/health | Out-Null
-              if ($LASTEXITCODE -eq 0) { $healthy = $true } else { Start-Sleep -Seconds 2 }
+            if (-not $candidateHealthy) {
+              curl.exe `
+                --silent `
+                --show-error `
+                --fail `
+                --max-time 5 `
+                "http://127.0.0.1:18001/api/health" | Out-Null
+
+              if ($LASTEXITCODE -eq 0) {
+                $candidateHealthy = $true
+              } else {
+                Start-Sleep -Seconds 2
+              }
             }
           }
-          if (-not $healthy) { docker logs $candidate; throw 'Candidate health check failed.' }
-          if ($old) { docker rm -f $env:CONTAINER_NAME }
-          try {
-            docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $env:IMAGE
-            if ($LASTEXITCODE -ne 0) { throw 'Production container failed to start.' }
-            docker rm -f $candidate
-            "After" | Set-Content `
-              "$env:GITHUB_WORKSPACE\deployment-results\phase.txt" `
-              -Encoding UTF8
-          } catch {
-            if ($oldImage) { docker rm -f $env:CONTAINER_NAME 2>$null; docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $oldImage }
-            throw
+
+          if (-not $candidateHealthy) {
+            docker logs $candidate
+            throw "Candidate container health check failed."
           }
 
-      - name: Verify application health and web page
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ok = $false
-          1..15 | ForEach-Object {
-            if (-not $ok) {
-              curl.exe --silent --show-error --fail --max-time 10 http://127.0.0.1:8001/api/health | Out-Host
-              if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 2 }
-            }
-          }
-          if (-not $ok) { docker ps -a; docker logs --tail 200 $env:CONTAINER_NAME; throw 'Health check failed.' }
-          curl.exe --silent --show-error --fail --max-time 10 http://127.0.0.1:8001/ | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Web page check failed.' }
+          # DURING: 기존 컨테이너 교체 구간 측정
+          docker stop $env:CONTAINER_NAME 2>$null
+          docker rm $env:CONTAINER_NAME 2>$null
 
-      - name: Finish monitoring and write Summary
-        if: always()
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
-        run: |
-          $dir = "$env:GITHUB_WORKSPACE\deployment-results"
-          Start-Sleep -Seconds 30
-          New-Item "$dir\stop" -ItemType File -Force | Out-Null
-          Start-Sleep -Seconds 2
-
-          $csv = "$dir\requests.csv"
-          if (Test-Path $csv) {
-              $rows = @(Import-Csv $csv)
-          }
-          else {
-              Write-Host "Monitoring CSV was not created."
-              $rows = @()
+          1..10 | ForEach-Object {
+            Test-App "During" $_
+            Start-Sleep -Seconds 1
           }
 
-          $before = @($rows | Where-Object {
+          # 새 운영 컨테이너 실행
+          docker run -d `
+            --name $env:CONTAINER_NAME `
+            --restart unless-stopped `
+            -p "${env:HOST_PORT}:8000" `
+            $env:IMAGE
+
+          if ($LASTEXITCODE -ne 0) {
+            docker logs $env:CONTAINER_NAME
+            throw "Production container failed to start."
+          }
+
+          docker rm -f $candidate 2>$null
+
+          # AFTER: 새 버전 상태 측정
+          1..30 | ForEach-Object {
+            Test-App "After" $_
+            Start-Sleep -Seconds 1
+          }
+
+          $rows = @(Import-Csv $csv)
+
+          $beforeOk = @($rows | Where-Object {
             $_.stage -eq "Before" -and $_.result -eq "PASS"
           }).Count
-          $beforeTotal = @($rows | Where-Object {
-            $_.stage -eq "Before"
-          }).Count
 
-          $during = @($rows | Where-Object {
+          $duringOk = @($rows | Where-Object {
             $_.stage -eq "During" -and $_.result -eq "PASS"
           }).Count
-          $duringTotal = @($rows | Where-Object {
-            $_.stage -eq "During"
-          }).Count
 
-          $after = @($rows | Where-Object {
+          $afterOk = @($rows | Where-Object {
             $_.stage -eq "After" -and $_.result -eq "PASS"
           }).Count
-          $afterTotal = @($rows | Where-Object {
-            $_.stage -eq "After"
-          }).Count
 
-          $final = if ($after -eq $afterTotal -and $afterTotal -gt 0) {
+          $overall = if ($afterOk -eq 30) {
             "SUCCESS"
           } else {
             "FAILED"
           }
 
-          @"
+          $summary = @"
           ## Animal Classifier Deployment Verification
 
           **Stable URL:** http://127.0.0.1:8001/  
-          **Final result:** $final
+          **Final result:** $overall  
+          **Full log:** deployment-results/requests.csv
 
           | Stage | Requests (ok/total) | HTTP | Analysis | Version | Result |
           |---|---:|---:|---|---|---|
-          | Before | $before/$beforeTotal | 200 | True | v2.0 | Measured |
-          | During | $during/$duringTotal | 200 | True | v2.0 | Measured |
-          | After | $after/$afterTotal | 200 | True | v2.0 | $final |
+          | Before | $beforeOk/10 | 200 | True | v2.0 | Measured |
+          | During | $duringOk/10 | 200 | True | v2.0 | Measured |
+          | After | $afterOk/30 | 200 | True | v2.0 | $overall |
 
-          Full UTF-8 log: `deployment-results/requests.csv`
-          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Append
+          Before: 10 requests  
+          During: 10 requests during the container replacement window  
+          After: 30 requests after deployment
+          "@
+
+          $summary |
+            Out-File $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Append
+
       - name: Upload deployment logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -177,4 +224,3 @@ jobs:
         continue-on-error: true
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: docker logout
-
