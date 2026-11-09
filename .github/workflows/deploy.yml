@@ -114,7 +114,14 @@ jobs:
           New-Item "$dir\stop" -ItemType File -Force | Out-Null
           Start-Sleep -Seconds 2
 
-          $rows = Import-Csv "$dir\requests.csv"
+          $csv = "$dir\requests.csv"
+          if (Test-Path $csv) {
+              $rows = @(Import-Csv $csv)
+          }
+          else {
+              Write-Host "Monitoring CSV was not created."
+              $rows = @()
+          }
 
           $before = @($rows | Where-Object {
             $_.stage -eq "Before" -and $_.result -eq "PASS"
