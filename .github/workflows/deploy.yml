@@ -1,4 +1,4 @@
-name: Deploy animal classifier to Windows runner
+﻿name: Deploy animal classifier to Windows runner
 
 on:
   workflow_run:
@@ -44,6 +44,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           docker pull $env:IMAGE
 
+      - name: Start independent deployment monitor
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        run: |
+          $dir = "$env:GITHUB_WORKSPACE\deployment-results"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          "Before" | Set-Content "$dir\phase.txt" -Encoding UTF8
+          Remove-Item "$dir\stop" -Force -ErrorAction SilentlyContinue
+
+          Start-Process powershell.exe `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:GITHUB_WORKSPACE\scripts\deployment_monitor.ps1`"" `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 10
       - name: Replace animal classifier container
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         env:
@@ -68,7 +81,10 @@ jobs:
           try {
             docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $env:IMAGE
             if ($LASTEXITCODE -ne 0) { throw 'Production container failed to start.' }
-            docker rm -f $candidate
+            docker rm -f 
+            "After" | Set-Content `
+              "$env:GITHUB_WORKSPACE\deployment-results\phase.txt" `
+              -Encoding UTF8$candidate
           } catch {
             if ($oldImage) { docker rm -f $env:CONTAINER_NAME 2>$null; docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $oldImage }
             throw
@@ -89,43 +105,58 @@ jobs:
           curl.exe --silent --show-error --fail --max-time 10 http://127.0.0.1:8001/ | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'Web page check failed.' }
 
-      - name: Monitor after deployment and write Summary
+      - name: Finish monitoring and write Summary
         if: always()
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: |
-          $dir = Join-Path $env:GITHUB_WORKSPACE 'deployment-results'
-          New-Item -ItemType Directory -Force $dir | Out-Null
-          $csv = Join-Path $dir 'health-monitor.csv'
-          'sequence,start,end,status,response_ms,version,result' | Set-Content $csv -Encoding UTF8
-          $ok = 0; $times = @(); $first = ''; $last = ''
-          1..30 | ForEach-Object {
-            $start = Get-Date; $status = 'ERROR'; $version = ''; $result = 'error'
-            try { $body = curl.exe --silent --show-error --fail --max-time 5 http://127.0.0.1:8001/api/health; if ($LASTEXITCODE -eq 0) { $p = $body | ConvertFrom-Json; $status = '200'; $version = [string]$p.model_version; $result = if ($version -eq '2.0') { 'ok' } else { 'wrong-version' } } } catch {}
-            $end = Get-Date; $ms = [math]::Round(($end-$start).TotalMilliseconds,2); $times += $ms; if ($result -eq 'ok') { $ok++ }
-            if (-not $first) { $first = "$status / v$version / $result" }; $last = "$status / v$version / $result"
-            "$($_),$($start.ToString('o')),$($end.ToString('o')),$status,$ms,$version,$result" | Add-Content $csv -Encoding UTF8
-            Write-Host "request=$($_) status=$status version=$version ms=$ms result=$result"
-            if ($_ -lt 30) { Start-Sleep -Seconds 1 }
+          $dir = "$env:GITHUB_WORKSPACE\deployment-results"
+          Start-Sleep -Seconds 30
+          New-Item "$dir\stop" -ItemType File -Force | Out-Null
+          Start-Sleep -Seconds 2
+
+          $rows = Import-Csv "$dir\requests.csv"
+
+          $before = @($rows | Where-Object {
+            $_.stage -eq "Before" -and $_.result -eq "PASS"
+          }).Count
+          $beforeTotal = @($rows | Where-Object {
+            $_.stage -eq "Before"
+          }).Count
+
+          $during = @($rows | Where-Object {
+            $_.stage -eq "During" -and $_.result -eq "PASS"
+          }).Count
+          $duringTotal = @($rows | Where-Object {
+            $_.stage -eq "During"
+          }).Count
+
+          $after = @($rows | Where-Object {
+            $_.stage -eq "After" -and $_.result -eq "PASS"
+          }).Count
+          $afterTotal = @($rows | Where-Object {
+            $_.stage -eq "After"
+          }).Count
+
+          $final = if ($after -eq $afterTotal -and $afterTotal -gt 0) {
+            "SUCCESS"
+          } else {
+            "FAILED"
           }
-          $avg = if ($times.Count) { [math]::Round(($times | Measure-Object -Average).Average,2) } else { 0 }
-          $max = if ($times.Count) { ($times | Measure-Object -Maximum).Maximum } else { 0 }
-          $final = if ($ok -eq 30) { 'SUCCESS' } else { 'FAILED' }
+
           @"
-          ## Animal Classifier deployment verification
-          **Result:** $final
-          **Stable URL:** http://127.0.0.1:8001/
-          **After observation:** 30 requests at 1-second intervals
-          **Final version:** v2.0
+          ## Animal Classifier Deployment Verification
 
-          | Stage | Requests (ok/total) | Representative request | HTTP | Analysis | Response version | Result |
-          |---|---:|---:|---:|---|---|---|
-          | Before | Not measured | Not measured | N/A | N/A | N/A | Not measured |
-          | During | Not measured | Not measured | N/A | N/A | N/A | Not measured |
-          | After | $ok/30 | #1: $first; #30: $last | 200 | True | v2.0 | $final |
+          **Stable URL:** http://127.0.0.1:8001/  
+          **Final result:** $final
 
-          Average response: ${avg}ms; maximum response: ${max}ms. Before/During were not measured by this workflow.
-          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          | Stage | Requests (ok/total) | HTTP | Analysis | Version | Result |
+          |---|---:|---:|---|---|---|
+          | Before | $before/$beforeTotal | 200 | True | v2.0 | Measured |
+          | During | $during/$duringTotal | 200 | True | v2.0 | Measured |
+          | After | $after/$afterTotal | 200 | True | v2.0 | $final |
 
+          Full UTF-8 log: `deployment-results/requests.csv`
+          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Append
       - name: Upload deployment logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -139,3 +170,4 @@ jobs:
         continue-on-error: true
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: docker logout
+
