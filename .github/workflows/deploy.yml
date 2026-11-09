@@ -114,7 +114,7 @@ jobs:
           New-Item "$dir\stop" -ItemType File -Force | Out-Null
           Start-Sleep -Seconds 2
 
-          $csv = "$dir\requests.csv"`r`n          if (Test-Path $csv) { $rows = @(Import-Csv $csv) } else { Write-Host "Monitoring CSV was not created."; $rows = @() }
+          $rows = Import-Csv "$dir\requests.csv"
 
           $before = @($rows | Where-Object {
             $_.stage -eq "Before" -and $_.result -eq "PASS"
@@ -170,5 +170,4 @@ jobs:
         continue-on-error: true
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: docker logout
-
 
