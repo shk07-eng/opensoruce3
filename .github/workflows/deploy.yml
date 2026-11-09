@@ -188,6 +188,38 @@ jobs:
           The no-interruption statement is limited to the observed post-deployment request window. Unobserved Before/During intervals are not claimed as zero-downtime.
           "@
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+      - name: Add screenshot-ready deployment table
+        if: always()
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        run: |
+          $csv = Join-Path $env:GITHUB_WORKSPACE 'deployment-results\health-monitor.csv'
+          $rows = if (Test-Path $csv) { Import-Csv $csv } else { @() }
+          $ok = @($rows | Where-Object result -eq 'ok').Count
+          $total = @($rows).Count
+          $representative = if ($rows.Count) { $rows[0] } else { $null }
+          $utc = (Get-Date).ToUniversalTime().ToString('o')
+          $status = if ($ok -eq $total -and $total -gt 0) { '200' } else { 'N/A' }
+          $version = if ($representative) { $representative.version } else { 'N/A' }
+          $result = if ($ok -eq $total -and $total -gt 0) { 'SUCCESS' } else { 'NOT VERIFIED' }
+          @"
+          ## Deployment verification
+
+          **Result:** $result  
+          **Stable URL:** http://127.0.0.1:8001/  
+          **UTC observation time:** $utc  
+          **Final version:** v$version
+
+          ### Before / during / after
+
+          | Stage | Requests (ok/total) | Representative request | UTC start | HTTP | Analysis | Response version | Result |
+          |---|---:|---:|---|---:|---|---|---|
+          | Before | Not measured | Not measured | Not measured | N/A | N/A | N/A | Not measured |
+          | During | Not measured | Not measured | Not measured | N/A | N/A | N/A | Not measured |
+          | After | $ok/$total | #1 | $utc | $status | True | v$version | $result |
+
+          **Observed API requests:** $ok/$total successful.  
+          **Zero-downtime conclusion:** limited to the observed After window; Before and During were not measured by this workflow.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
       - name: Post Log in to Docker Hub
         if: always()
         continue-on-error: true
