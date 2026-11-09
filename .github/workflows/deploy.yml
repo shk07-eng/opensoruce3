@@ -81,10 +81,10 @@ jobs:
           try {
             docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $env:IMAGE
             if ($LASTEXITCODE -ne 0) { throw 'Production container failed to start.' }
-            docker rm -f 
+            docker rm -f $candidate
             "After" | Set-Content `
               "$env:GITHUB_WORKSPACE\deployment-results\phase.txt" `
-              -Encoding UTF8$candidate
+              -Encoding UTF8
           } catch {
             if ($oldImage) { docker rm -f $env:CONTAINER_NAME 2>$null; docker run -d --name $env:CONTAINER_NAME --restart unless-stopped -p "${env:HOST_PORT}:8000" $oldImage }
             throw
@@ -170,4 +170,5 @@ jobs:
         continue-on-error: true
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
         run: docker logout
+
 
